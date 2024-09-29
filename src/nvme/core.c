@@ -610,6 +610,9 @@ int nvme_ctrl_init(struct nvme_ctrl *ctrl, const char *bdf,
 	else
 		memcpy(&ctrl->opts, &nvme_ctrl_opts_default, sizeof(*opts));
 
+	ctrl->nr_sqs = ctrl->opts.nsqr + 2;
+	ctrl->nr_cqs = ctrl->opts.ncqr + 2;
+
 	if ((ctrl->pci.classcode & 0xff) == 0x03)
 		ctrl->flags = NVME_CTRL_F_ADMINISTRATIVE;
 
@@ -631,8 +634,8 @@ int nvme_ctrl_init(struct nvme_ctrl *ctrl, const char *bdf,
 	ctrl->config.mqes = NVME_FIELD_GET(cap, CAP_MQES);
 
 	/* +2 because nsqr/ncqr are zero-based values and do not account for the admin queue */
-	ctrl->sq = znew_t(struct nvme_sq, ctrl->opts.nsqr + 2);
-	ctrl->cq = znew_t(struct nvme_cq, ctrl->opts.ncqr + 2);
+	ctrl->sq = znew_t(struct nvme_sq, ctrl->nr_sqs);
+	ctrl->cq = znew_t(struct nvme_cq, ctrl->nr_cqs);
 
 	return 0;
 }

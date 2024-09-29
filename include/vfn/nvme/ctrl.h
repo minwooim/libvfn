@@ -65,6 +65,9 @@ struct nvme_ctrl {
 	struct nvme_sq *sq;
 	struct nvme_cq *cq;
 
+	int nr_sqs;
+	int nr_cqs;
+
 	/**
 	 * @adminq: Admin queue pair
 	 */
