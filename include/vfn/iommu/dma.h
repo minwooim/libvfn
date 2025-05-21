@@ -99,6 +99,19 @@ struct iommu_iova_range {
 bool iommu_translate_vaddr(struct iommu_ctx *ctx, void *vaddr, uint64_t *iova);
 
 /**
+ * iommu_translate_iova - Translate a I/O virtual address into a virtual address
+ * @ctx: &struct iommu_ctx
+ * @iova: I/O virtual address
+ * @vaddr: output parameter
+ *
+ * Iterate the iova map within the iommu context to lookup and translate the given
+ * I/O virtual address into a CPU virtual address.
+ *
+ * Return: ``true`` on success, ``false`` if no mapping was found.
+ */
+bool iommu_translate_iova(struct iommu_ctx *ctx, uint64_t iova, void **vaddr);
+
+/**
  * iommu_get_iova_ranges - Get iova ranges
  * @ctx: &struct iommu_ctx
  * @ranges: output parameter
