@@ -98,6 +98,7 @@ struct nvme_ctrl {
 		int nsqa, ncqa;
 		int mqes;
 		int mps;
+		uint8_t mdts;
 	} config;
 
 	/**

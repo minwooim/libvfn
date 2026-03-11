@@ -146,6 +146,7 @@ enum nvme_identify_cns {
 };
 
 enum nvme_identify_ctrl_offset {
+	NVME_IDENTIFY_CTRL_MDTS		= 77,
 	NVME_IDENTIFY_CTRL_OACS		= 256,
 	NVME_IDENTIFY_CTRL_SGLS		= 536,
 };

@@ -205,8 +205,10 @@ static int __nvme_configure_sq(struct nvme_ctrl *ctrl, int qid, int qsize,
 	uint64_t cap;
 	uint8_t dstrd;
 	size_t pagesize;
+	int max_prps, n_prplist_pages, remaining;
 
 	pagesize = __mps_to_pagesize(ctrl->config.mps);
+	max_prps = (int)(pagesize / sizeof(uint64_t));
 
 	cap = le64_to_cpu(mmio_read64(ctrl->regs + NVME_REG_CAP));
 	dstrd = NVME_FIELD_GET(cap, CAP_DSTRD);
@@ -244,7 +246,19 @@ static int __nvme_configure_sq(struct nvme_ctrl *ctrl, int qid, int qsize,
 	 * Use ctrl->config.mps instead of host page size, as we have the
 	 * opportunity to pack the allocations.
 	 */
-	if (iommu_get_dmabuf(__iommu_ctx(ctrl), &sq->pages, __abort_on_overflow(qsize, pagesize), 0x0))
+	if (!ctrl->config.mdts) {
+		n_prplist_pages = 1;
+	} else {
+		remaining = (1 << ctrl->config.mdts) - 1;
+		if (remaining <= max_prps)
+			n_prplist_pages = 1;
+		else
+			n_prplist_pages = (remaining - max_prps - 1) / (max_prps - 1) + 2;
+	}
+
+	if (iommu_get_dmabuf(__iommu_ctx(ctrl), &sq->pages,
+			     __abort_on_overflow((unsigned int)qsize * n_prplist_pages,
+						 pagesize), 0x0))
 		return -1;
 
 	sq->rqs = znew_t(struct nvme_rq, qsize - 1);
@@ -256,8 +270,8 @@ static int __nvme_configure_sq(struct nvme_ctrl *ctrl, int qid, int qsize,
 		rq->sq = sq;
 		rq->cid = (uint16_t)i;
 
-		rq->page.vaddr = sq->pages.vaddr + (i << __mps_to_pageshift(ctrl->config.mps));
-		rq->page.iova = sq->pages.iova + (i << __mps_to_pageshift(ctrl->config.mps));
+		rq->page.vaddr = sq->pages.vaddr + (size_t)i * n_prplist_pages * pagesize;
+		rq->page.iova = sq->pages.iova + (size_t)i * n_prplist_pages * pagesize;
 
 		if (i > 0)
 			rq->rq_next = &sq->rqs[i - 1];
@@ -760,6 +774,8 @@ int nvme_init(struct nvme_ctrl *ctrl, const char *bdf, const struct nvme_ctrl_op
 
 	if (nvme_admin(ctrl, &cmd, buffer.vaddr, buffer.len, NULL))
 		return -1;
+
+	ctrl->config.mdts = *(uint8_t *)(buffer.vaddr + NVME_IDENTIFY_CTRL_MDTS);
 
 	oacs = le16_to_cpu(*(leint16_t *)(buffer.vaddr + NVME_IDENTIFY_CTRL_OACS));
 	if (oacs & NVME_IDENTIFY_CTRL_OACS_DBCONFIG && nvme_init_dbconfig(ctrl))
