@@ -199,25 +199,37 @@ static int vfio_iommu_type1_get_capabilities(struct vfio_container *vfio)
 }
 #endif /* VFIO_IOMMU_INFO_CAPS */
 
+static void __iova_put_free(struct skiplist *free_list, uint64_t start, size_t len);
+
 static bool __iova_reserve(struct iommu_iova_range *ranges, int nranges, uint64_t *next,
-			   size_t len, uint64_t *iova, size_t align)
+			   size_t len, uint64_t *iova, size_t align,
+			   struct skiplist *free_iovas)
 {
 	uint64_t _next = *next;
 
 	for (int i = 0; i < nranges; i++) {
 		struct iommu_iova_range *r = &ranges[i];
+		uint64_t aligned;
 
 		if (r->last < _next)
 			continue;
 
 		_next = max_t(uint64_t, _next, r->start);
-		_next = ALIGN_UP(_next, align);
+		aligned = ALIGN_UP(_next, align);
 
-		if (_next > r->last || r->last - _next + 1 < len)
+		if (aligned > r->last || r->last - aligned + 1 < len)
 			continue;
 
-		*iova = _next;
-		*next = _next + len;
+		/*
+		 * The gap between _next and the alignment boundary is wasted
+		 * IOVA space.  Return it to the free list so it can be reused
+		 * for smaller-alignment or page-aligned requests.
+		 */
+		if (free_iovas && aligned > _next)
+			__iova_put_free(free_iovas, _next, aligned - _next);
+
+		*iova = aligned;
+		*next = aligned + len;
 
 		return true;
 	}
@@ -237,8 +249,6 @@ static int iova_free_range_cmp(const void *iova, const struct skiplist_node *n)
 
 	return 0;
 }
-
-static void __iova_put_free(struct skiplist *free_list, uint64_t start, size_t len);
 
 static struct vfio_iova_free_range *__iova_get_free_range(struct skiplist *free_list,
 							  size_t len, size_t align)
@@ -378,7 +388,7 @@ static int vfio_iommu_type1_iova_reserve(struct iommu_ctx *ctx, size_t len, uint
 	if (flags & IOMMU_MAP_EPHEMERAL) {
 		/* Ephemeral IOVAs are from a small reserved range; use page alignment only. */
 		if (!__iova_reserve(&vfio->ephemerals, 1, &vfio->next_ephemeral, len, iova,
-				    __VFN_PAGESIZE))
+				    __VFN_PAGESIZE, NULL))
 			goto enomem;
 
 		atomic_inc(&vfio->nephemerals);
@@ -389,7 +399,8 @@ static int vfio_iommu_type1_iova_reserve(struct iommu_ctx *ctx, size_t len, uint
 	if (__iova_get_free(&vfio->free_iovas, len, iova, align))
 		return 0;
 
-	if (__iova_reserve(ctx->iova_ranges, ctx->nranges, &vfio->next, len, iova, align))
+	if (__iova_reserve(ctx->iova_ranges, ctx->nranges, &vfio->next, len, iova, align,
+			   &vfio->free_iovas))
 		return 0;
 
 enomem:
