@@ -17,7 +17,7 @@ struct iommu_ctx;
 struct iommu_ctx_ops {
 	/* container/ioas ops */
 	int (*iova_reserve)(struct iommu_ctx *ctx, size_t len, uint64_t *iova,
-			    unsigned long flags);
+			    unsigned long flags, size_t align);
 	void (*iova_put_ephemeral)(struct iommu_ctx *ctx);
 	int (*dma_map)(struct iommu_ctx *ctx, void *vaddr, size_t len, uint64_t *iova,
 		       unsigned long flags);

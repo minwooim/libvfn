@@ -113,8 +113,8 @@ bool iommu_translate_vaddr(struct iommu_ctx *ctx, void *vaddr, uint64_t *iova)
 	return false;
 }
 
-int iommu_map_vaddr(struct iommu_ctx *ctx, void *vaddr, size_t len, uint64_t *iova,
-		    unsigned long flags)
+int iommu_map_vaddr_aligned(struct iommu_ctx *ctx, void *vaddr, size_t len, uint64_t *iova,
+			    unsigned long flags, size_t iova_align)
 {
 	uint64_t _iova;
 
@@ -123,7 +123,8 @@ int iommu_map_vaddr(struct iommu_ctx *ctx, void *vaddr, size_t len, uint64_t *io
 
 	if (flags & IOMMU_MAP_FIXED_IOVA) {
 		_iova = *iova;
-	} else if (ctx->ops.iova_reserve && ctx->ops.iova_reserve(ctx, len, &_iova, flags)) {
+	} else if (ctx->ops.iova_reserve &&
+		   ctx->ops.iova_reserve(ctx, len, &_iova, flags, iova_align)) {
 		log_debug("failed to allocate iova\n");
 		return -1;
 	}
@@ -143,6 +144,12 @@ out:
 		*iova = _iova;
 
 	return 0;
+}
+
+int iommu_map_vaddr(struct iommu_ctx *ctx, void *vaddr, size_t len, uint64_t *iova,
+		    unsigned long flags)
+{
+	return iommu_map_vaddr_aligned(ctx, vaddr, len, iova, flags, __VFN_PAGESIZE);
 }
 
 int iommu_unmap_vaddr(struct iommu_ctx *ctx, void *vaddr, size_t *len)

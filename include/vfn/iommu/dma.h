@@ -32,6 +32,31 @@ enum iommu_map_flags {
 };
 
 /**
+ * iommu_map_vaddr_aligned - Map a virtual memory address to an I/O virtual address with custom alignment
+ * @ctx: &struct iommu_ctx
+ * @vaddr: virtual memory address to map (must be page-aligned)
+ * @len: number of bytes to map (must be a multiple of the system page size)
+ * @iova: output parameter for mapped I/O virtual address
+ * @flags: combination of enum iommu_map_flags
+ * @iova_align: required alignment for the allocated IOVA, in bytes; must be a
+ *              power of two and a multiple of the system page size
+ *
+ * Like iommu_map_vaddr(), but allows the caller to specify a custom IOVA
+ * alignment.  The virtual address (@vaddr) is still aligned to the system page
+ * size as usual; only the IOVA allocation is affected by @iova_align.
+ *
+ * This is useful when a device requires a larger-than-page-size IOVA alignment
+ * (e.g. 2 MiB huge-page aligned IOVAs for performance).
+ *
+ * Note that, for the vfio backend, the allocated IOVA is not recycled when the
+ * mapping is removed; the IOVA will never be allocated again.
+ *
+ * Return: ``0`` on success, ``-1`` on error and sets ``errno``.
+ */
+int iommu_map_vaddr_aligned(struct iommu_ctx *ctx, void *vaddr, size_t len, uint64_t *iova,
+			    unsigned long flags, size_t iova_align);
+
+/**
  * iommu_map_vaddr - Map a virtual memory address to an I/O virtual address
  * @ctx: &struct iommu_ctx
  * @vaddr: virtual memory address to map
@@ -45,6 +70,9 @@ enum iommu_map_flags {
  *
  * If @vaddr falls within an already mapped area, calculate the corresponding
  * iova instead.
+ *
+ * The IOVA is aligned to the system page size. Use iommu_map_vaddr_aligned()
+ * to request a larger alignment.
  *
  * Note that, for the vfio backend, the allocated IOVA is not recycled when the
  * mapping is removed; the IOVA will never be allocated again.

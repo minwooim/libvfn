@@ -200,7 +200,7 @@ static int vfio_iommu_type1_get_capabilities(struct vfio_container *vfio)
 #endif /* VFIO_IOMMU_INFO_CAPS */
 
 static bool __iova_reserve(struct iommu_iova_range *ranges, int nranges, uint64_t *next,
-			   size_t len, uint64_t *iova)
+			   size_t len, uint64_t *iova, size_t align)
 {
 	uint64_t _next = *next;
 
@@ -211,6 +211,7 @@ static bool __iova_reserve(struct iommu_iova_range *ranges, int nranges, uint64_
 			continue;
 
 		_next = max_t(uint64_t, _next, r->start);
+		_next = ALIGN_UP(_next, align);
 
 		if (_next > r->last || r->last - _next + 1 < len)
 			continue;
@@ -237,19 +238,32 @@ static int iova_free_range_cmp(const void *iova, const struct skiplist_node *n)
 	return 0;
 }
 
+static void __iova_put_free(struct skiplist *free_list, uint64_t start, size_t len);
+
 static struct vfio_iova_free_range *__iova_get_free_range(struct skiplist *free_list,
-							  size_t len)
+							  size_t len, size_t align)
 {
 	struct vfio_iova_free_range *range, *best_fit = NULL;
 	struct skiplist_node *n, *next;
 	size_t best_fit_size = SIZE_MAX;
 
-	/* Find best-fit free range (smallest range that fits) */
+	/* Find best-fit free range (smallest range that satisfies len with alignment) */
 	skiplist_for_each_safe(free_list, n, next, 0) {
+		uint64_t aligned_start, range_end;
+		size_t available;
+
 		if (n == NULL || n == &free_list->sentinel)
 			continue;
 		range = container_of_var(n, range, list);
-		if (range->len >= len && range->len < best_fit_size) {
+		aligned_start = ALIGN_UP(range->start, align);
+		range_end = range->start + range->len;
+
+		if (aligned_start >= range_end)
+			continue;
+
+		available = range_end - aligned_start;
+
+		if (available >= len && range->len < best_fit_size) {
 			best_fit = range;
 			best_fit_size = range->len;
 			if (range->len == len)
@@ -261,26 +275,34 @@ static struct vfio_iova_free_range *__iova_get_free_range(struct skiplist *free_
 }
 
 static bool __iova_get_free(struct skiplist *free_list, size_t len,
-			    uint64_t *iova)
+			    uint64_t *iova, size_t align)
 {
 	struct vfio_iova_free_range *range;
+	struct skiplist_node *update[SKIPLIST_LEVELS] = {};
+	uint64_t orig_start, orig_end, aligned_start;
 
-	range = __iova_get_free_range(free_list, len);
+	range = __iova_get_free_range(free_list, len, align);
 	if (!range)
 		return false;
 
-	*iova = range->start;
+	orig_start = range->start;
+	orig_end = range->start + range->len;
+	aligned_start = ALIGN_UP(orig_start, align);
 
-	if (range->len == len) {
-		struct skiplist_node *update[SKIPLIST_LEVELS] = {};
+	/* Remove the original range from the free list */
+	skiplist_find(free_list, &orig_start, iova_free_range_cmp, update);
+	skiplist_erase(free_list, &range->list, update);
+	free(range);
 
-		skiplist_find(free_list, &range->start, iova_free_range_cmp, update);
-		skiplist_erase(free_list, &range->list, update);
-		free(range);
-	} else {
-		range->start += len;
-		range->len -= len;
-	}
+	/* Return the pre-alignment padding to the free list */
+	if (aligned_start > orig_start)
+		__iova_put_free(free_list, orig_start, aligned_start - orig_start);
+
+	/* Return the trailing remainder to the free list */
+	if (aligned_start + len < orig_end)
+		__iova_put_free(free_list, aligned_start + len, orig_end - (aligned_start + len));
+
+	*iova = aligned_start;
 
 	return true;
 }
@@ -341,7 +363,7 @@ static void __iova_put_free(struct skiplist *free_list, uint64_t start, size_t l
 }
 
 static int vfio_iommu_type1_iova_reserve(struct iommu_ctx *ctx, size_t len, uint64_t *iova,
-					 unsigned long flags)
+					 unsigned long flags, size_t align)
 {
 	struct vfio_container *vfio = container_of_var(ctx, vfio, ctx);
 
@@ -354,7 +376,9 @@ static int vfio_iommu_type1_iova_reserve(struct iommu_ctx *ctx, size_t len, uint
 	}
 
 	if (flags & IOMMU_MAP_EPHEMERAL) {
-		if (!__iova_reserve(&vfio->ephemerals, 1, &vfio->next_ephemeral, len, iova))
+		/* Ephemeral IOVAs are from a small reserved range; use page alignment only. */
+		if (!__iova_reserve(&vfio->ephemerals, 1, &vfio->next_ephemeral, len, iova,
+				    __VFN_PAGESIZE))
 			goto enomem;
 
 		atomic_inc(&vfio->nephemerals);
@@ -362,10 +386,10 @@ static int vfio_iommu_type1_iova_reserve(struct iommu_ctx *ctx, size_t len, uint
 		return 0;
 	}
 
-	if (__iova_get_free(&vfio->free_iovas, len, iova))
+	if (__iova_get_free(&vfio->free_iovas, len, iova, align))
 		return 0;
 
-	if (__iova_reserve(ctx->iova_ranges, ctx->nranges, &vfio->next, len, iova))
+	if (__iova_reserve(ctx->iova_ranges, ctx->nranges, &vfio->next, len, iova, align))
 		return 0;
 
 enomem:
@@ -394,7 +418,8 @@ static int vfio_iommu_type1_init(struct vfio_container *vfio)
 	}
 #endif
 
-	if (vfio_iommu_type1_iova_reserve(&vfio->ctx, VFIO_IOMMU_TYPE1_IOVA_RESERVED, &iova, 0x0)) {
+	if (vfio_iommu_type1_iova_reserve(&vfio->ctx, VFIO_IOMMU_TYPE1_IOVA_RESERVED, &iova, 0x0,
+					  __VFN_PAGESIZE)) {
 		log_debug("could not reserve iova range\n");
 		return -1;
 	}
