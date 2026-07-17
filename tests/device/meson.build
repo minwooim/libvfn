@@ -12,6 +12,7 @@ device_tests = {
   'identify': ['identify.c'],
   'io': ['io.c'],
   'open': ['open.c'],
+  'prplist': ['prplist.c'],
   'timeout': ['timeout.c'],
 }
 
