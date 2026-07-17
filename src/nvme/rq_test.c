@@ -499,7 +499,7 @@ int main(void)
 	 * the chain link.
 	 */
 	memset(mppages, 0x0, 2 * __VFN_PAGESIZE);
-	ok1(nvme_map_prp(&ctrl, mprplists, 2, &cmd, 0x1000000,
+	ok1(nvme_map_prp(&ctrl, mprplists, 2, &cmd, (iova_t)0x1000000,
 			 (__max_prps_per_page + 1) * 0x1000) == 0);
 	ok1(le64_to_cpu(cmd.dptr.prp1) == 0x1000000);
 	ok1(le64_to_cpu(cmd.dptr.prp2) == (uint64_t)mprplists);
@@ -516,7 +516,7 @@ int main(void)
 	 * fail.
 	 */
 	memset(mppages, 0x0, 2 * __VFN_PAGESIZE);
-	ok1(nvme_map_prp(&ctrl, mprplists, 2, &cmd, 0x1000000,
+	ok1(nvme_map_prp(&ctrl, mprplists, 2, &cmd, (iova_t)0x1000000,
 			 (2 * __max_prps_per_page) * 0x1000 + 0x1000) == -1);
 
 	/*
