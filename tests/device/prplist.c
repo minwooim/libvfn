@@ -32,6 +32,13 @@
 /* two prplist pages, so the list must chain to cover the test buffer */
 #define NPRPLISTS 2
 
+/*
+ * @id must be a page-aligned mapping (see pgmap()): nvme_admin() DMA-maps it
+ * on the fly, and the VFIO/iommufd backends require the vaddr, length and
+ * iova to all be page aligned. A stack- or heap-allocated buffer isn't
+ * guaranteed to be, and the mapping call fails before the command is ever
+ * submitted.
+ */
 static int identify_ctrl(struct nvme_id_ctrl *id)
 {
 	union nvme_cmd cmd = {
@@ -41,7 +48,7 @@ static int identify_ctrl(struct nvme_id_ctrl *id)
 		},
 	};
 
-	return nvme_admin(&ctrl, &cmd, id, sizeof(*id), NULL);
+	return nvme_admin(&ctrl, &cmd, id, NVME_IDENTIFY_DATA_SIZE, NULL);
 }
 
 static int identify_ns(struct nvme_id_ns *id)
@@ -54,7 +61,7 @@ static int identify_ns(struct nvme_id_ns *id)
 		},
 	};
 
-	return nvme_admin(&ctrl, &cmd, id, sizeof(*id), NULL);
+	return nvme_admin(&ctrl, &cmd, id, NVME_IDENTIFY_DATA_SIZE, NULL);
 }
 
 static int do_io(uint8_t opcode, leint64_t *prplists, iova_t iova, size_t len, uint16_t nlb)
@@ -89,8 +96,8 @@ static int do_io(uint8_t opcode, leint64_t *prplists, iova_t iova, size_t len, u
 
 int main(int argc, char **argv)
 {
-	struct nvme_id_ctrl id_ctrl;
-	struct nvme_id_ns id_ns;
+	struct nvme_id_ctrl *id_ctrl;
+	struct nvme_id_ns *id_ns;
 	struct iommu_ctx *ictx;
 	void *prppages, *wbuf, *rbuf;
 	leint64_t *prplists;
@@ -110,12 +117,18 @@ int main(int argc, char **argv)
 		goto out;
 	}
 
-	if (identify_ctrl(&id_ctrl)) {
+	if (pgmap((void **)&id_ctrl, NVME_IDENTIFY_DATA_SIZE) < 0)
+		err(1, "failed to map identify controller buffer");
+
+	if (pgmap((void **)&id_ns, NVME_IDENTIFY_DATA_SIZE) < 0)
+		err(1, "failed to map identify namespace buffer");
+
+	if (identify_ctrl(id_ctrl)) {
 		skip(1, "failed to identify controller");
 		goto out;
 	}
 
-	if (identify_ns(&id_ns)) {
+	if (identify_ns(id_ns)) {
 		skip(1, "failed to identify namespace");
 		goto out;
 	}
@@ -124,7 +137,7 @@ int main(int argc, char **argv)
 	pagesize = __mps_to_pagesize(ctrl.config.mps);
 	max_prps = 1 << (pageshift - 3);
 
-	lba_size = 1ULL << id_ns.lbaf[id_ns.flbas & 0xf].ds;
+	lba_size = 1ULL << id_ns->lbaf[id_ns->flbas & 0xf].ds;
 
 	/*
 	 * pick a length that requires (max_prps + 1) PRP entries, i.e. one more
@@ -134,8 +147,8 @@ int main(int argc, char **argv)
 	len = (size_t)(max_prps + 1) * pagesize;
 	nlba = len / lba_size;
 
-	if (id_ctrl.mdts && id_ctrl.mdts < 64)
-		max_xfer = (1ULL << id_ctrl.mdts) * pagesize;
+	if (id_ctrl->mdts && id_ctrl->mdts < 64)
+		max_xfer = (1ULL << id_ctrl->mdts) * pagesize;
 	else
 		max_xfer = UINT64_MAX;
 
@@ -144,7 +157,7 @@ int main(int argc, char **argv)
 		goto out;
 	}
 
-	if (nlba > le64_to_cpu(id_ns.nsze)) {
+	if (nlba > le64_to_cpu(id_ns->nsze)) {
 		skip(1, "namespace too small for multi-page prplist test");
 		goto out;
 	}
@@ -155,6 +168,9 @@ int main(int argc, char **argv)
 	}
 
 	nlb = (uint16_t)(nlba - 1);
+
+	pgunmap(id_ns, NVME_IDENTIFY_DATA_SIZE);
+	pgunmap(id_ctrl, NVME_IDENTIFY_DATA_SIZE);
 
 	ictx = __iommu_ctx(&ctrl);
 
