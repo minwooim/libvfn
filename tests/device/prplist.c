@@ -39,18 +39,6 @@
  * guaranteed to be, and the mapping call fails before the command is ever
  * submitted.
  */
-static int identify_ctrl(struct nvme_id_ctrl *id)
-{
-	union nvme_cmd cmd = {
-		.identify = (struct nvme_cmd_identify) {
-			.opcode = nvme_admin_identify,
-			.cns = NVME_IDENTIFY_CNS_CTRL,
-		},
-	};
-
-	return nvme_admin(&ctrl, &cmd, id, NVME_IDENTIFY_DATA_SIZE, NULL);
-}
-
 static int identify_ns(struct nvme_id_ns *id)
 {
 	union nvme_cmd cmd = {
@@ -78,16 +66,26 @@ static int do_io(uint8_t opcode, leint64_t *prplists, iova_t iova, size_t len, u
 		},
 	};
 
-	if (nvme_map_prp(&ctrl, prplists, NPRPLISTS, &cmd, iova, len))
+	if (nvme_map_prp(&ctrl, prplists, NPRPLISTS, &cmd, iova, len)) {
+		diag("nvme_map_prp failed: %s", strerror(errno));
 		return -1;
+	}
 
 	rq = nvme_rq_acquire(sq);
-	if (!rq)
+	if (!rq) {
+		diag("nvme_rq_acquire failed: %s", strerror(errno));
 		return -1;
+	}
 
 	nvme_rq_exec(rq, &cmd);
 
 	ret = nvme_rq_spin(rq, &cqe);
+	if (ret) {
+		uint16_t status = le16_to_cpu(cqe.sfp) >> 1;
+
+		diag("command failed: %s (cqe status 0x%" PRIx16 ")", strerror(errno),
+		     status & 0x7ff);
+	}
 
 	nvme_rq_release(rq);
 
@@ -96,7 +94,6 @@ static int do_io(uint8_t opcode, leint64_t *prplists, iova_t iova, size_t len, u
 
 int main(int argc, char **argv)
 {
-	struct nvme_id_ctrl *id_ctrl;
 	struct nvme_id_ns *id_ns;
 	struct iommu_ctx *ictx;
 	void *prppages, *wbuf, *rbuf;
@@ -104,7 +101,7 @@ int main(int argc, char **argv)
 	iova_t prplist_iova, wiova, riova;
 	int pageshift, max_prps;
 	size_t pagesize, lba_size, len;
-	uint64_t max_xfer, nlba;
+	uint64_t nlba;
 	uint16_t nlb;
 	unsigned int i;
 
@@ -117,16 +114,8 @@ int main(int argc, char **argv)
 		goto out;
 	}
 
-	if (pgmap((void **)&id_ctrl, NVME_IDENTIFY_DATA_SIZE) < 0)
-		err(1, "failed to map identify controller buffer");
-
 	if (pgmap((void **)&id_ns, NVME_IDENTIFY_DATA_SIZE) < 0)
 		err(1, "failed to map identify namespace buffer");
-
-	if (identify_ctrl(id_ctrl)) {
-		skip(1, "failed to identify controller");
-		goto out;
-	}
 
 	if (identify_ns(id_ns)) {
 		skip(1, "failed to identify namespace");
@@ -142,20 +131,13 @@ int main(int argc, char **argv)
 	/*
 	 * pick a length that requires (max_prps + 1) PRP entries, i.e. one more
 	 * than fits in a single prplist page, so the mapping can only succeed if
-	 * the list is chained across the two pages in @prplists.
+	 * the list is chained across the two pages in @prplists. This is sent
+	 * regardless of what the controller advertises as MDTS; if it's smaller
+	 * than this, the device is expected to reject the command, but the PRP
+	 * chaining itself is exercised on the host side either way.
 	 */
 	len = (size_t)(max_prps + 1) * pagesize;
 	nlba = len / lba_size;
-
-	if (id_ctrl->mdts && id_ctrl->mdts < 64)
-		max_xfer = (1ULL << id_ctrl->mdts) * pagesize;
-	else
-		max_xfer = UINT64_MAX;
-
-	if (len > max_xfer) {
-		skip(1, "device MDTS too small to force multi-page prplist chaining");
-		goto out;
-	}
 
 	if (nlba > le64_to_cpu(id_ns->nsze)) {
 		skip(1, "namespace too small for multi-page prplist test");
@@ -170,7 +152,6 @@ int main(int argc, char **argv)
 	nlb = (uint16_t)(nlba - 1);
 
 	pgunmap(id_ns, NVME_IDENTIFY_DATA_SIZE);
-	pgunmap(id_ctrl, NVME_IDENTIFY_DATA_SIZE);
 
 	ictx = __iommu_ctx(&ctrl);
 
@@ -203,14 +184,18 @@ int main(int argc, char **argv)
 	memset(rbuf, 0, len);
 	memset(prplists, 0x0, NPRPLISTS * pagesize);
 
-	if (do_io(nvme_cmd_write, prplists, wiova, len, nlb))
-		err(1, "write command failed");
+	if (do_io(nvme_cmd_write, prplists, wiova, len, nlb)) {
+		ok(false, "data written and read back through a chained multi-page prplist matches");
+		goto out;
+	}
 
 	/* reset the prplist pages so the read exercises chaining afresh */
 	memset(prplists, 0x0, NPRPLISTS * pagesize);
 
-	if (do_io(nvme_cmd_read, prplists, riova, len, nlb))
-		err(1, "read command failed");
+	if (do_io(nvme_cmd_read, prplists, riova, len, nlb)) {
+		ok(false, "data written and read back through a chained multi-page prplist matches");
+		goto out;
+	}
 
 	ok(!memcmp(wbuf, rbuf, len),
 	   "data written and read back through a chained multi-page prplist matches");
